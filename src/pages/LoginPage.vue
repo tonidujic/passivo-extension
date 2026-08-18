@@ -39,7 +39,7 @@ async function login() {
   loading.value = true
 
   try {
-    const initRes = await fetch('http://localhost:3000/api/auth/login/init', {
+    const initRes = await fetch('https://passivo-backend.onrender.com/api/auth/login/init', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -67,7 +67,7 @@ async function login() {
 
     const rawAuthKey = await exportAuthKey(authKey)
 
-    const res = await fetch('http://localhost:3000/api/auth/login', {
+    const res = await fetch('https://passivo-backend.onrender.com/api/auth/login', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
