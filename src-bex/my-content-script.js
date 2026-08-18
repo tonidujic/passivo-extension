@@ -1,6 +1,5 @@
 import '#q-app/bex/content'
 import { base64ToArrayBuffer, arrayBufferToBase64 } from './crypto/encoding.js'
-
 import {
   decryptCredential,
   decryptData,
@@ -8,16 +7,13 @@ import {
   encryptData,
 } from './crypto/encryption.js'
 
-import api from './api.js'
-
 let passivoButton = null
 let generateButton = null
 let isSavingSignupPassword = false
 let signupCheckInterval = null
+let currentInput = null
 
 const PENDING_SIGNUP_KEY = 'passivoPendingSignup'
-
-let currentInput = null
 
 function hasExtensionContext() {
   return Boolean(typeof chrome !== 'undefined' && chrome?.runtime?.id && chrome?.storage?.local)
@@ -27,82 +23,59 @@ function isExtensionContextError(err) {
   const message = String(err?.message || '').toLowerCase()
 
   return (
-    message.includes('extension context invalidated') || message.includes('context invalidated')
+    message.includes('extension context invalidated') ||
+    message.includes('context invalidated') ||
+    message.includes('receiving end does not exist')
   )
 }
 
 async function storageGet(keys) {
-  if (!hasExtensionContext()) {
-    console.warn('Passivo: chrome.storage is not available in this context.')
-    return null
-  }
+  if (!hasExtensionContext()) return null
 
   try {
     return await chrome.storage.local.get(keys)
   } catch (err) {
-    if (isExtensionContextError(err)) {
-      console.warn('Passivo: extension context invalidated. Refresh the page.')
-      return null
-    }
-
+    if (isExtensionContextError(err)) return null
     throw err
   }
 }
 
 async function storageSet(values) {
-  if (!hasExtensionContext()) {
-    return false
-  }
+  if (!hasExtensionContext()) return false
 
   try {
     await chrome.storage.local.set(values)
     return true
   } catch (err) {
-    if (isExtensionContextError(err)) {
-      return false
-    }
-
+    if (isExtensionContextError(err)) return false
     throw err
   }
 }
 
 async function storageRemove(keys) {
-  if (!hasExtensionContext()) {
-    return false
-  }
+  if (!hasExtensionContext()) return false
 
   try {
     await chrome.storage.local.remove(keys)
     return true
   } catch (err) {
-    if (isExtensionContextError(err)) {
-      return false
-    }
-
+    if (isExtensionContextError(err)) return false
     throw err
   }
 }
 
 async function storageClear() {
-  if (!hasExtensionContext()) {
-    return
-  }
+  if (!hasExtensionContext()) return
 
   try {
     await chrome.storage.local.clear()
   } catch (err) {
-    if (isExtensionContextError(err)) {
-      return
-    }
-
-    throw err
+    if (!isExtensionContextError(err)) throw err
   }
 }
 
 function sendExtensionMessage(message) {
-  if (typeof chrome === 'undefined' || !chrome?.runtime?.id || !chrome?.runtime?.sendMessage) {
-    return false
-  }
+  if (!hasExtensionContext() || !chrome?.runtime?.sendMessage) return false
 
   try {
     chrome.runtime.sendMessage(message)
@@ -116,12 +89,36 @@ function sendExtensionMessage(message) {
   }
 }
 
+async function sendBackgroundRequest(message) {
+  if (!hasExtensionContext() || !chrome?.runtime?.sendMessage) {
+    throw new Error('Passivo extension is not available. Refresh the page.')
+  }
+
+  try {
+    const response = await chrome.runtime.sendMessage(message)
+
+    if (!response) {
+      throw new Error('Passivo background service did not respond.')
+    }
+
+    return response
+  } catch (err) {
+    if (isExtensionContextError(err)) {
+      throw new Error('Passivo extension was reloaded. Refresh this page and try again.')
+    }
+
+    throw err
+  }
+}
+
 function isPassivoOwnPage() {
   const hostname = window.location.hostname
   const port = window.location.port
 
   return (
-    (hostname === 'localhost' && port === '9001') || (hostname === '127.0.0.1' && port === '9001')
+    hostname === 'passivo-frontend.onrender.com' ||
+    (hostname === 'localhost' && (port === '9000' || port === '9001')) ||
+    (hostname === '127.0.0.1' && (port === '9000' || port === '9001'))
   )
 }
 
@@ -140,9 +137,7 @@ function websitesMatch(a, b) {
   const siteA = normalizeWebsite(a)
   const siteB = normalizeWebsite(b)
 
-  if (!siteA || !siteB) {
-    return false
-  }
+  if (!siteA || !siteB) return false
 
   return siteA === siteB || siteA.endsWith(`.${siteB}`) || siteB.endsWith(`.${siteA}`)
 }
@@ -176,20 +171,57 @@ function isSignupPage(input = null) {
     text.includes('terms of service')
 
   const hasSignupButton =
-    text.includes('sign up') || text.includes('signup') || text.includes('register')
+    text.includes('sign up') ||
+    text.includes('signup') ||
+    text.includes('register') ||
+    text.includes('create account')
 
   const hasLoginText =
     text.includes('log in') || text.includes('login') || text.includes('forgot password')
 
-  if (isLoginUrl && !isSignupUrl) {
-    return false
-  }
+  if (isLoginUrl && !isSignupUrl) return false
 
-  if (hasLoginText && !hasSignupFields && !isSignupUrl) {
-    return false
-  }
+  if (hasLoginText && !hasSignupFields && !isSignupUrl) return false
 
   return isSignupUrl || hasSignupFields || hasSignupButton
+}
+
+async function getPrivateKey(savedPrivateKey) {
+  if (!savedPrivateKey) {
+    throw new Error('Passivo private key is missing.')
+  }
+
+  const privateKeyBuffer = base64ToArrayBuffer(savedPrivateKey)
+
+  return await crypto.subtle.importKey(
+    'pkcs8',
+    privateKeyBuffer,
+    {
+      name: 'RSA-OAEP',
+      hash: 'SHA-256',
+    },
+    false,
+    ['decrypt'],
+  )
+}
+
+async function getPublicKey(savedPublicKey) {
+  if (!savedPublicKey) {
+    throw new Error('Passivo public key is missing.')
+  }
+
+  const publicKeyBuffer = base64ToArrayBuffer(savedPublicKey)
+
+  return await crypto.subtle.importKey(
+    'spki',
+    publicKeyBuffer,
+    {
+      name: 'RSA-OAEP',
+      hash: 'SHA-256',
+    },
+    false,
+    ['encrypt'],
+  )
 }
 
 async function createPendingSignupCredential(username, password) {
@@ -207,11 +239,8 @@ async function createPendingSignupCredential(username, password) {
   const title = `Lozinka za ${websiteName}`
 
   const encryptedCredential = await encryptCredential(password, publicKey)
-
   const encryptedWebsite = await encryptData(currentWebsite, publicKey)
-
   const encryptedUsername = await encryptData(username || '', publicKey)
-
   const encryptedTitle = await encryptData(title, publicKey)
 
   return await storageSet({
@@ -252,21 +281,25 @@ async function savePendingSignupCredential(pending) {
     return 'account-mismatch'
   }
 
-  await api.post(
-    '/password',
-    {
+  const response = await sendBackgroundRequest({
+    type: 'SAVE_PASSIVO_PASSWORD',
+    token: savedInfo.token,
+    payload: {
       title: pending.title,
       website: pending.website,
       username: pending.username,
       credential: pending.credential,
       favorite: false,
     },
-    {
-      headers: {
-        Authorization: `Bearer ${savedInfo.token}`,
-      },
-    },
-  )
+  })
+
+  if (!response.ok) {
+    if (response.status === 401) {
+      return 'not-logged-in'
+    }
+
+    throw new Error(response.error || 'Passivo could not save this password.')
+  }
 
   return 'saved'
 }
@@ -298,10 +331,10 @@ function injectPassivoUiStyles() {
     .passivo-modal {
       position: absolute !important;
 
-      top: 22px !important;
-      right: 22px !important;
+      top: 20px !important;
+      right: 20px !important;
 
-      width: 330px !important;
+      width: 320px !important;
 
       box-sizing: border-box !important;
 
@@ -309,40 +342,35 @@ function injectPassivoUiStyles() {
 
       pointer-events: auto !important;
 
-      background: rgba(255, 255, 255, 0.985) !important;
+      background: rgba(255, 255, 255, 0.98) !important;
 
-      border: 1px solid rgba(17, 24, 39, 0.10) !important;
+      border: 1px solid rgba(15, 23, 42, 0.10) !important;
 
       border-radius: 16px !important;
 
       box-shadow:
-        0 18px 44px rgba(17, 24, 39, 0.13),
-        0 2px 8px rgba(17, 24, 39, 0.04) !important;
+        0 18px 45px rgba(15, 23, 42, 0.13),
+        0 2px 8px rgba(15, 23, 42, 0.05) !important;
 
-      backdrop-filter: blur(16px) !important;
-      -webkit-backdrop-filter: blur(16px) !important;
+      backdrop-filter: blur(14px) !important;
 
-      animation: passivoPanelIn 0.18s ease !important;
-    }
+      -webkit-backdrop-filter: blur(14px) !important;
 
-    .passivo-header {
-      display: flex !important;
-      align-items: center !important;
-
-      margin: 0 0 17px !important;
+      animation: passivoPanelIn 0.2s ease !important;
     }
 
     .passivo-brand {
-      margin: 0 !important;
+      margin: 0 0 14px !important;
 
       color: #111827 !important;
 
-      font-size: 24px !important;
+      font-size: 22px !important;
+
       line-height: 1 !important;
 
       font-weight: 800 !important;
 
-      letter-spacing: -0.75px !important;
+      letter-spacing: -0.65px !important;
     }
 
     .passivo-title {
@@ -350,46 +378,50 @@ function injectPassivoUiStyles() {
 
       color: #111827 !important;
 
-      font-size: 15px !important;
-      line-height: 1.35 !important;
+      font-size: 16px !important;
 
-      font-weight: 700 !important;
+      line-height: 1.3 !important;
 
-      letter-spacing: -0.15px !important;
+      font-weight: 750 !important;
+
+      letter-spacing: -0.2px !important;
     }
 
     .passivo-description {
       margin: 5px 0 0 !important;
 
-      color: #667085 !important;
+      color: #64748b !important;
 
-      font-size: 11.5px !important;
-      line-height: 1.45 !important;
+      font-size: 12px !important;
+
+      line-height: 1.5 !important;
 
       font-weight: 400 !important;
     }
 
     .passivo-site {
-      margin: 13px 0 0 !important;
+      margin: 12px 0 0 !important;
 
-      padding: 9px 11px !important;
+      padding: 9px 10px !important;
 
       overflow: hidden !important;
 
-      background: #f7f8f9 !important;
+      background: #f8fafc !important;
 
-      border: 1px solid #eceef0 !important;
+      border: 1px solid #eef1f4 !important;
 
       border-radius: 9px !important;
 
-      color: #475467 !important;
+      color: #475569 !important;
 
       font-size: 11px !important;
+
       line-height: 1.25 !important;
 
       font-weight: 600 !important;
 
       white-space: nowrap !important;
+
       text-overflow: ellipsis !important;
     }
 
@@ -397,15 +429,15 @@ function injectPassivoUiStyles() {
       display: flex !important;
 
       justify-content: flex-end !important;
-      align-items: center !important;
 
-      gap: 7px !important;
+      gap: 8px !important;
 
-      margin: 16px 0 0 !important;
+      margin: 14px 0 0 !important;
     }
 
     .passivo-btn {
       height: 35px !important;
+
       min-height: 35px !important;
 
       box-sizing: border-box !important;
@@ -422,15 +454,15 @@ function injectPassivoUiStyles() {
         sans-serif !important;
 
       font-size: 11.5px !important;
+
       line-height: 1 !important;
 
-      font-weight: 650 !important;
+      font-weight: 700 !important;
 
       cursor: pointer !important;
 
       transition:
         background 0.15s ease,
-        color 0.15s ease,
         border-color 0.15s ease,
         transform 0.15s ease,
         box-shadow 0.15s ease !important;
@@ -441,19 +473,19 @@ function injectPassivoUiStyles() {
     }
 
     .passivo-cancel {
-      background: transparent !important;
+      background: #ffffff !important;
 
-      color: #667085 !important;
+      color: #64748b !important;
 
-      border: 1px solid transparent !important;
+      border: 1px solid #e2e8f0 !important;
 
       box-shadow: none !important;
     }
 
     .passivo-cancel:hover {
-      background: #f5f6f7 !important;
+      background: #f8fafc !important;
 
-      color: #344054 !important;
+      color: #334155 !important;
     }
 
     .passivo-save {
@@ -473,38 +505,38 @@ function injectPassivoUiStyles() {
 
       border-color: #bce0c8 !important;
 
-      box-shadow:
-        0 4px 10px rgba(22, 163, 74, 0.08) !important;
+      box-shadow: 0 4px 10px rgba(22, 163, 74, 0.08) !important;
     }
 
     .passivo-toast {
       position: fixed !important;
 
-      top: 22px !important;
-      right: 22px !important;
+      top: 20px !important;
+      right: 20px !important;
 
       z-index: 2147483647 !important;
 
-      width: 286px !important;
+      width: 292px !important;
 
       box-sizing: border-box !important;
 
       padding: 12px 13px !important;
 
       display: flex !important;
+
       align-items: center !important;
 
       gap: 10px !important;
 
-      background: rgba(255, 255, 255, 0.985) !important;
+      background: rgba(255, 255, 255, 0.98) !important;
 
-      border: 1px solid rgba(17, 24, 39, 0.10) !important;
+      border: 1px solid rgba(15, 23, 42, 0.10) !important;
 
       border-radius: 13px !important;
 
       box-shadow:
-        0 14px 34px rgba(17, 24, 39, 0.11),
-        0 2px 7px rgba(17, 24, 39, 0.04) !important;
+        0 14px 35px rgba(15, 23, 42, 0.12),
+        0 2px 7px rgba(15, 23, 42, 0.04) !important;
 
       color: #111827 !important;
 
@@ -515,10 +547,11 @@ function injectPassivoUiStyles() {
         "Segoe UI",
         sans-serif !important;
 
-      backdrop-filter: blur(16px) !important;
-      -webkit-backdrop-filter: blur(16px) !important;
+      backdrop-filter: blur(14px) !important;
 
-      animation: passivoPanelIn 0.18s ease !important;
+      -webkit-backdrop-filter: blur(14px) !important;
+
+      animation: passivoPanelIn 0.2s ease !important;
     }
 
     .passivo-toast-brand {
@@ -527,20 +560,12 @@ function injectPassivoUiStyles() {
       color: #111827 !important;
 
       font-size: 13px !important;
-      line-height: 1 !important;
 
       font-weight: 800 !important;
 
-      letter-spacing: -0.25px !important;
-    }
+      padding-right: 10px !important;
 
-    .passivo-toast-divider {
-      width: 1px !important;
-      height: 27px !important;
-
-      flex: 0 0 1px !important;
-
-      background: #e5e7eb !important;
+      border-right: 1px solid #e5e7eb !important;
     }
 
     .passivo-toast-text {
@@ -550,36 +575,41 @@ function injectPassivoUiStyles() {
     }
 
     .passivo-toast-title {
-      margin: 0 0 2px !important;
+      margin: 0 0 1px !important;
 
       color: #111827 !important;
 
       font-size: 11.5px !important;
+
       line-height: 1.3 !important;
 
-      font-weight: 720 !important;
+      font-weight: 750 !important;
     }
 
     .passivo-toast-message {
       margin: 0 !important;
 
-      color: #667085 !important;
+      color: #64748b !important;
 
       font-size: 9.8px !important;
+
       line-height: 1.4 !important;
 
       font-weight: 400 !important;
     }
 
     .passivo-toast-status {
-      width: 21px !important;
-      height: 21px !important;
+      width: 20px !important;
+
+      height: 20px !important;
 
       display: flex !important;
+
       align-items: center !important;
+
       justify-content: center !important;
 
-      flex: 0 0 21px !important;
+      flex: 0 0 20px !important;
 
       border-radius: 999px !important;
 
@@ -590,22 +620,21 @@ function injectPassivoUiStyles() {
       color: #187844 !important;
 
       font-size: 10px !important;
+
       line-height: 1 !important;
 
       font-weight: 800 !important;
     }
 
-    .passivo-toast-warning
-    .passivo-toast-status {
-      background: #fff7ed !important;
+    .passivo-toast-warning .passivo-toast-status {
+      background: #fff7e6 !important;
 
-      border-color: #fed7aa !important;
+      border-color: #f6d596 !important;
 
-      color: #d97706 !important;
+      color: #b66a00 !important;
     }
 
-    .passivo-toast-error
-    .passivo-toast-status {
+    .passivo-toast-error .passivo-toast-status {
       background: #fef2f2 !important;
 
       border-color: #fecaca !important;
@@ -614,27 +643,20 @@ function injectPassivoUiStyles() {
     }
 
     .passivo-toast-out {
-      animation:
-        passivoPanelOut
-        0.18s ease
-        forwards !important;
+      animation: passivoPanelOut 0.18s ease forwards !important;
     }
 
     @keyframes passivoPanelIn {
       from {
         opacity: 0;
 
-        transform:
-          translateY(-7px)
-          scale(0.985);
+        transform: translateY(-7px) scale(0.985);
       }
 
       to {
         opacity: 1;
 
-        transform:
-          translateY(0)
-          scale(1);
+        transform: translateY(0) scale(1);
       }
     }
 
@@ -642,17 +664,13 @@ function injectPassivoUiStyles() {
       from {
         opacity: 1;
 
-        transform:
-          translateY(0)
-          scale(1);
+        transform: translateY(0) scale(1);
       }
 
       to {
         opacity: 0;
 
-        transform:
-          translateY(-5px)
-          scale(0.99);
+        transform: translateY(-5px) scale(0.99);
       }
     }
 
@@ -660,7 +678,9 @@ function injectPassivoUiStyles() {
       .passivo-modal,
       .passivo-toast {
         top: 12px !important;
+
         right: 12px !important;
+
         left: 12px !important;
 
         width: auto !important;
@@ -671,7 +691,11 @@ function injectPassivoUiStyles() {
   document.head.appendChild(style)
 }
 
-function showPassivoConfirm({ website = window.location.hostname } = {}) {
+function showPassivoConfirm({
+  title = 'Save password to Passivo?',
+  description = 'Securely store this login in your vault.',
+  website = window.location.hostname,
+} = {}) {
   injectPassivoUiStyles()
 
   return new Promise((resolve) => {
@@ -685,29 +709,23 @@ function showPassivoConfirm({ website = window.location.hostname } = {}) {
 
     modal.className = 'passivo-modal'
 
-    const header = document.createElement('div')
-
-    header.className = 'passivo-header'
-
     const brand = document.createElement('div')
 
     brand.className = 'passivo-brand'
 
     brand.textContent = 'Passivo'
 
-    header.appendChild(brand)
+    const titleElement = document.createElement('div')
 
-    const title = document.createElement('div')
+    titleElement.className = 'passivo-title'
 
-    title.className = 'passivo-title'
+    titleElement.textContent = title
 
-    title.textContent = 'Save password to Passivo?'
+    const descriptionElement = document.createElement('div')
 
-    const description = document.createElement('div')
+    descriptionElement.className = 'passivo-description'
 
-    description.className = 'passivo-description'
-
-    description.textContent = 'Securely store this login in your vault.'
+    descriptionElement.textContent = description
 
     const site = document.createElement('div')
 
@@ -739,11 +757,11 @@ function showPassivoConfirm({ website = window.location.hostname } = {}) {
 
     actions.appendChild(saveButton)
 
-    modal.appendChild(header)
+    modal.appendChild(brand)
 
-    modal.appendChild(title)
+    modal.appendChild(titleElement)
 
-    modal.appendChild(description)
+    modal.appendChild(descriptionElement)
 
     modal.appendChild(site)
 
@@ -791,11 +809,11 @@ function showPassivoConfirm({ website = window.location.hostname } = {}) {
 
     document.addEventListener('keydown', handleEscape)
 
-    document.body.appendChild(overlay)
-
     setTimeout(() => {
       document.addEventListener('mousedown', handleOutsideClick, true)
     }, 0)
+
+    document.body.appendChild(overlay)
 
     saveButton.focus()
   })
@@ -816,10 +834,6 @@ function showPassivoToast(message, type = 'success') {
 
   brand.textContent = 'Passivo'
 
-  const divider = document.createElement('div')
-
-  divider.className = 'passivo-toast-divider'
-
   const text = document.createElement('div')
 
   text.className = 'passivo-toast-text'
@@ -831,9 +845,9 @@ function showPassivoToast(message, type = 'success') {
   if (type === 'success') {
     toastTitle.textContent = 'Password saved'
   } else if (type === 'warning') {
-    toastTitle.textContent = 'Sign in required'
+    toastTitle.textContent = 'Passivo'
   } else {
-    toastTitle.textContent = 'Could not save'
+    toastTitle.textContent = 'Something went wrong'
   }
 
   const toastMessage = document.createElement('div')
@@ -846,21 +860,13 @@ function showPassivoToast(message, type = 'success') {
 
   status.className = 'passivo-toast-status'
 
-  if (type === 'success') {
-    status.textContent = '✓'
-  } else if (type === 'warning') {
-    status.textContent = '!'
-  } else {
-    status.textContent = '×'
-  }
+  status.textContent = type === 'success' ? '✓' : type === 'warning' ? '!' : '×'
 
   text.appendChild(toastTitle)
 
   text.appendChild(toastMessage)
 
   toast.appendChild(brand)
-
-  toast.appendChild(divider)
 
   toast.appendChild(text)
 
@@ -892,6 +898,7 @@ async function offerPendingPasswordSave() {
 
   if (!pending.createdAt || age > 5 * 60 * 1000) {
     await removePendingSignupCredential()
+
     return
   }
 
@@ -902,11 +909,14 @@ async function offerPendingPasswordSave() {
   }
 
   const shouldSave = await showPassivoConfirm({
+    title: 'Save password to Passivo?',
+    description: 'Securely store this login in your vault.',
     website: pending.hostname,
   })
 
   if (!shouldSave) {
     await removePendingSignupCredential()
+
     return
   }
 
@@ -941,7 +951,7 @@ async function offerPendingPasswordSave() {
 
     console.error('Passivo pending signup save error:', err)
 
-    showPassivoToast('Passivo could not save this password.', 'error')
+    showPassivoToast(err?.message || 'Passivo could not save this password.', 'error')
   } finally {
     isSavingSignupPassword = false
   }
@@ -961,13 +971,7 @@ function generateStrongPassword(length = 18) {
 }
 
 function isPasswordInput(el) {
-  if (!el || el.tagName !== 'INPUT') {
-    return false
-  }
-
-  const type = el.type?.toLowerCase() || ''
-
-  return type === 'password'
+  return Boolean(el && el.tagName === 'INPUT' && (el.type || '').toLowerCase() === 'password')
 }
 
 function isLoginInput(el) {
@@ -976,20 +980,12 @@ function isLoginInput(el) {
   }
 
   const type = el.type?.toLowerCase() || ''
-
   const name = el.name?.toLowerCase() || ''
-
   const id = el.id?.toLowerCase() || ''
-
   const placeholder = el.placeholder?.toLowerCase() || ''
-
   const autocomplete = el.autocomplete?.toLowerCase() || ''
 
-  if (type === 'password') {
-    return true
-  }
-
-  if (type === 'email') {
+  if (type === 'password' || type === 'email') {
     return true
   }
 
@@ -1018,11 +1014,13 @@ function isLoginInput(el) {
 function removeButton({ passivo = true, generate = true } = {}) {
   if (passivo && passivoButton) {
     passivoButton.remove()
+
     passivoButton = null
   }
 
   if (generate && generateButton) {
     generateButton.remove()
+
     generateButton = null
   }
 }
@@ -1035,6 +1033,7 @@ function createButton(input, buttonContent, type = 'passivo') {
   const button = document.createElement('button')
 
   button.type = 'button'
+
   button.innerText = buttonContent
 
   button.style.position = 'fixed'
@@ -1049,9 +1048,9 @@ function createButton(input, buttonContent, type = 'passivo') {
 
   button.style.background = '#ffffff'
 
-  button.style.color = '#187844'
+  button.style.color = '#1f9d4a'
 
-  button.style.border = '1px solid #cde9d7'
+  button.style.border = '1px solid rgba(31, 157, 74, 0.45)'
 
   button.style.borderRadius = '12px'
 
@@ -1063,7 +1062,7 @@ function createButton(input, buttonContent, type = 'passivo') {
 
   button.style.transition = 'all 0.15s ease'
 
-  button.style.boxShadow = '0 4px 10px rgba(22, 163, 74, 0.08)'
+  button.style.boxShadow = '0 4px 10px rgba(31, 157, 74, 0.16)'
 
   if (type === 'generate') {
     generateButton = button
@@ -1137,44 +1136,6 @@ function findUsernameInput() {
   return null
 }
 
-async function getPrivateKey(savedPrivateKey) {
-  if (!savedPrivateKey) {
-    throw new Error('Passivo private key is missing.')
-  }
-
-  const privateKeyBuffer = base64ToArrayBuffer(savedPrivateKey)
-
-  return await crypto.subtle.importKey(
-    'pkcs8',
-    privateKeyBuffer,
-    {
-      name: 'RSA-OAEP',
-      hash: 'SHA-256',
-    },
-    false,
-    ['decrypt'],
-  )
-}
-
-async function getPublicKey(savedPublicKey) {
-  if (!savedPublicKey) {
-    throw new Error('Passivo public key is missing.')
-  }
-
-  const publicKeyBuffer = base64ToArrayBuffer(savedPublicKey)
-
-  return await crypto.subtle.importKey(
-    'spki',
-    publicKeyBuffer,
-    {
-      name: 'RSA-OAEP',
-      hash: 'SHA-256',
-    },
-    false,
-    ['encrypt'],
-  )
-}
-
 async function decryptWebsiteCompat(encryptedWebsite, privateKey) {
   if (!encryptedWebsite) {
     return null
@@ -1193,12 +1154,14 @@ async function decryptWebsiteCompat(encryptedWebsite, privateKey) {
   }
 }
 
-function extractPasswordItems(response) {
+function extractPasswordItems(payload) {
   const possibleResult =
-    response?.data?.data?.result?.result ??
-    response?.data?.data?.result ??
-    response?.data?.data ??
-    response?.data ??
+    payload?.data?.result?.result ??
+    payload?.data?.result ??
+    payload?.result?.result ??
+    payload?.result ??
+    payload?.data ??
+    payload ??
     []
 
   if (Array.isArray(possibleResult)) {
@@ -1211,13 +1174,26 @@ function extractPasswordItems(response) {
 async function findCredentialForCurrentWebsite(privateKey, token) {
   const currentWebsite = normalizeWebsite(window.location.hostname)
 
-  const res = await api.get('/password', {
-    headers: {
-      Authorization: `Bearer ${token}`,
-    },
+  const response = await sendBackgroundRequest({
+    type: 'GET_PASSIVO_PASSWORDS',
+    token,
   })
 
-  const items = extractPasswordItems(res)
+  if (!response.ok) {
+    if (response.status === 401) {
+      await storageRemove(['token', 'privateKey', 'publicKey'])
+
+      sendExtensionMessage({
+        type: 'OPEN_PASSIVO_LOGIN',
+      })
+    }
+
+    throw new Error(
+      response.error || `Could not load passwords${response.status ? ` (${response.status})` : ''}`,
+    )
+  }
+
+  const items = extractPasswordItems(response.data)
 
   for (const item of items) {
     const rawWebsite = await decryptWebsiteCompat(item.website, privateKey)
@@ -1262,7 +1238,7 @@ async function fillCredentials() {
   } catch (err) {
     console.error('Passivo private key import failed:', err)
 
-    alert('Passivo could not load your encryption key. Log out of Passivo and log in again.')
+    showPassivoToast('Log in to Passivo again to restore your encryption key.', 'error')
 
     return
   }
@@ -1274,13 +1250,13 @@ async function fillCredentials() {
   } catch (err) {
     console.error('Passivo password fetch failed:', err)
 
-    alert('Passivo could not load saved passwords.')
+    showPassivoToast(err?.message || 'Passivo could not load saved passwords.', 'error')
 
     return
   }
 
   if (!matchedItem) {
-    alert('No Passivo credential found for this website.')
+    showPassivoToast('No saved Passivo credential was found for this website.', 'warning')
 
     return
   }
@@ -1295,9 +1271,7 @@ async function fillCredentials() {
   } catch (err) {
     console.error('Passivo credential decrypt failed:', err)
 
-    alert(
-      'Passivo found this credential but could not decrypt it. Log out of Passivo and log in again.',
-    )
+    showPassivoToast('Passivo found this credential but could not decrypt it.', 'error')
 
     return
   }
@@ -1367,9 +1341,10 @@ function showPassivoButton(input) {
 
   const button = createButton(input, 'Use Passivo', 'passivo')
 
-  button.addEventListener('mousedown', async (e) => {
-    e.preventDefault()
-    e.stopPropagation()
+  button.addEventListener('mousedown', async (event) => {
+    event.preventDefault()
+
+    event.stopPropagation()
 
     try {
       await fillCredentials()
@@ -1380,7 +1355,7 @@ function showPassivoButton(input) {
 
       console.error('Passivo autofill error:', err)
 
-      alert(err?.message || 'Passivo autofill failed.')
+      showPassivoToast(err?.message || 'Passivo autofill failed.', 'error')
     }
   })
 
@@ -1395,16 +1370,17 @@ function showGenerateButton(input) {
 
   const button = createButton(input, 'Passivo strong password', 'generate')
 
-  button.addEventListener('mousedown', async (e) => {
-    e.preventDefault()
-    e.stopPropagation()
+  button.addEventListener('mousedown', async (event) => {
+    event.preventDefault()
+
+    event.stopPropagation()
 
     try {
       await fillGeneratedPassword()
     } catch (err) {
       console.error('Passivo password generator error:', err)
 
-      alert(err?.message || 'Password generation failed.')
+      showPassivoToast(err?.message || 'Password generation failed.', 'error')
     }
   })
 
@@ -1493,8 +1469,8 @@ document.addEventListener('focusin', async (event) => {
   }
 })
 
-document.addEventListener('click', (e) => {
-  if (passivoButton && e.target !== passivoButton && e.target !== currentInput) {
+document.addEventListener('click', (event) => {
+  if (passivoButton && event.target !== passivoButton && event.target !== currentInput) {
     removeButton({
       passivo: true,
       generate: true,
@@ -1555,11 +1531,7 @@ if (typeof chrome !== 'undefined' && chrome?.storage?.onChanged) {
     try {
       const savedInfo = await storageGet(['token', 'privateKey'])
 
-      if (!savedInfo) {
-        return
-      }
-
-      if (!savedInfo.token || !savedInfo.privateKey) {
+      if (!savedInfo?.token || !savedInfo?.privateKey) {
         return
       }
 
@@ -1621,9 +1593,7 @@ async function handleSignupAttempt(event) {
     }
   }
 
-  const usernameInput = findUsernameInput()
-
-  const username = usernameInput?.value?.trim() || ''
+  const username = findUsernameInput()?.value?.trim() || ''
 
   const passwordInputs = [...document.querySelectorAll('input[type="password"]')]
 
@@ -1724,6 +1694,7 @@ function checkSignupResultAndSave() {
 
       if (!pending) {
         stopChecking()
+
         return
       }
 
