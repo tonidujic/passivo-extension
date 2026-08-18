@@ -1,6 +1,6 @@
 import '#q-app/bex/background'
 
-const API_BASE_URL = 'https://passivo-backend.onrender.com/api'
+const API_BASE_URL = 'https://api.passivo.site/api'
 
 const PASSIVO_APP_URL = chrome.runtime.getURL('www/index.html')
 

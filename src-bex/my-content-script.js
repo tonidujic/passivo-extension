@@ -116,7 +116,8 @@ function isPassivoOwnPage() {
   const port = window.location.port
 
   return (
-    hostname === 'passivo-frontend.onrender.com' ||
+    hostname === 'passivo.site' ||
+    hostname === 'www.passivo.site' ||
     (hostname === 'localhost' && (port === '9000' || port === '9001')) ||
     (hostname === '127.0.0.1' && (port === '9000' || port === '9001'))
   )

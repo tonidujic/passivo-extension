@@ -1,7 +1,7 @@
 import axios from 'axios'
 
 const api = axios.create({
-  baseURL: 'https://passivo-backend.onrender.com/api',
+  baseURL: 'https://api.passivo.site/api',
 })
 
 api.interceptors.request.use(
